@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>程序头像总览</title>
+<style>
+body{background:#141a24;color:#e8eef6;font-family:"Microsoft YaHei",sans-serif;padding:20px}
+h1{font-size:18px;font-weight:600}
+#grid{display:grid;grid-template-columns:repeat(13,1fr);gap:10px}
+.cell{text-align:center;font-size:11px;color:#b9c6d6;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.cell img{width:100%;border-radius:50%;display:block;margin-bottom:4px}
+</style>
+</head>
+<body>
+<h1>程序头像总览 <span id="count"></span></h1>
+<div id="grid"></div>
+<script type="module">
+import {DEMO_NAMES, makeTestAvatar} from './demo-avatars.mjs?v=1';
+const grid = document.getElementById('grid');
+document.getElementById('count').textContent = '（' + DEMO_NAMES.length + ' 人，程序生成不重样）';
+DEMO_NAMES.forEach((name, i) => {
+	const d = document.createElement('div');
+	d.className = 'cell';
+	const img = document.createElement('img');
+	img.src = makeTestAvatar(i);
+	img.alt = name;
+	d.append(img, document.createTextNode(name));
+	grid.append(d);
+});
+window.__ready = true;
+</script>
+</body>
+</html>
