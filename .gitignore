@@ -37,3 +37,7 @@ popup-test-result.json
 .cover-profile/
 .snd-profile/
 .err-check/
+
+# ===== MiMo TTS（API Key 与语音缓存，绝不上传）=====
+mimo-api-key.txt
+tts-cache/

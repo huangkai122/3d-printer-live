@@ -18,6 +18,49 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 
+# —— MiMo TTS：本地代理 /api/tts 使用，API Key 不进浏览器页面 ——
+MIMO_TTS_URL = 'https://api.xiaomimimo.com/v1/chat/completions'
+MIMO_VOICES = ('mimo_default', '冰糖', '茉莉', '苏打', '白桦', 'Mia', 'Chloe', 'Milo', 'Dean')
+TTS_CACHE_DIR = ROOT / 'tts-cache'
+TTS_STYLE_PROMPT = ('你是一位直播间互动助手。用热情、亲切、清晰的语气播报下面的内容，'
+                    '语速稍快、吐字清楚、情绪饱满，像主播感谢观众一样自然。')
+
+def mimo_api_key():
+    key = os.environ.get('MIMO_API_KEY', '').strip()
+    if key:
+        return key
+    try:
+        return (ROOT / 'mimo-api-key.txt').read_text(encoding='utf-8').strip()
+    except OSError:
+        return ''
+
+def mimo_tts(text, voice):
+    import base64
+    import hashlib
+    TTS_CACHE_DIR.mkdir(exist_ok=True)
+    cache = TTS_CACHE_DIR / (hashlib.sha1((voice + '\x00' + text).encode('utf-8')).hexdigest() + '.mp3')
+    if cache.exists() and cache.stat().st_size > 44:
+        return cache.read_bytes()
+    payload = {
+        'model': 'mimo-v2.5-tts',
+        'messages': [
+            {'role': 'user', 'content': TTS_STYLE_PROMPT},
+            {'role': 'assistant', 'content': text},
+        ],
+        'audio': {'format': 'mp3', 'voice': voice if voice in MIMO_VOICES else 'mimo_default'},
+    }
+    request = urllib.request.Request(
+        MIMO_TTS_URL, data=json.dumps(payload).encode('utf-8'),
+        headers={'api-key': mimo_api_key(), 'Content-Type': 'application/json'})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        data = json.load(response)
+    encoded = ((data.get('choices') or [{}])[0].get('message') or {}).get('audio', {}).get('data')
+    audio = base64.b64decode(encoded) if encoded else b''
+    if not audio:
+        raise RuntimeError('MiMo TTS 未返回音频')
+    cache.write_bytes(audio)
+    return audio
+
 def room_id(raw):
     match = re.fullmatch(r'(?:https?://live\.douyin\.com/)?(\d{5,25})(?:[/?#].*)?', str(raw).strip())
     if not match:
@@ -110,6 +153,10 @@ def ensure_server():
             return True
 
         def do_POST(self):
+            if self.path == '/api/tts':
+                if not self._guard():
+                    return self._json(403, '{"ok":false,"error":"forbidden"}')
+                return self._tts()
             if self.path != '/__scene-message' or not self._guard():
                 return self._json(403, '{"error":"forbidden"}')
             try:
@@ -121,6 +168,34 @@ def ensure_server():
                 return self._json(200, '{"ok":true}')
             except (ValueError, KeyError, TypeError):
                 return self._json(400, '{"error":"invalid message"}')
+
+        def _tts(self):
+            # 浏览器页面 → 本地服务 → MiMo TTS。带磁盘缓存：同一句话同一音色只调用一次。
+            try:
+                length = int(self.headers.get('Content-Length', '0'))
+                if not 0 < length <= 65536:
+                    raise ValueError('bad length')
+                body = json.loads(self.rfile.read(length))
+                text = str(body.get('text') or '').strip()[:300]
+                voice = str(body.get('voice') or 'mimo_default')
+            except (ValueError, TypeError):
+                return self._json(400, '{"ok":false,"error":"invalid body"}')
+            if not text:
+                return self._json(400, '{"ok":false,"error":"empty text"}')
+            if voice not in MIMO_VOICES:
+                voice = 'mimo_default'
+            if not mimo_api_key():
+                return self._json(503, '{"ok":false,"error":"no-api-key"}')
+            try:
+                audio = mimo_tts(text, voice)
+            except Exception as exc:
+                return self._json(502, json.dumps(dict(ok=False, error=str(exc)[:200])))
+            self.send_response(200)
+            self.send_header('Content-Type', 'audio/mpeg')
+            self.send_header('Content-Length', str(len(audio)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(audio)
 
         def do_GET(self):
             nonlocal bridge_process

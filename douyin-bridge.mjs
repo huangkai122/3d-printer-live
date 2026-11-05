@@ -435,13 +435,23 @@ async function openTab(port, url) {
   return null;
 }
 
+// 独立直播窗口（WebView2 :9224）的 CDP 端口锁定，初始取环境变量。
+// 窗口被关闭后自动解除锁定并回退到默认浏览器来源，避免"独立直播窗口未就绪"死循环刷日志。
+let cdpLockedPort = process.env.PRINTER_CDP_PORT || '';
+
 async function findTarget(room) {
   const roomUrl = 'https://live.douyin.com/' + room;
-  for (const port of (process.env.PRINTER_CDP_PORT ? [Number(process.env.PRINTER_CDP_PORT)] : [9223, 9110, 9222])) {
+  for (const port of (cdpLockedPort ? [Number(cdpLockedPort)] : [9223, 9110, 9222])) {
     let pages;
     try { pages = await listPages(port) } catch { continue }
     let hit = pages.find(t => { const m = (t.url || '').match(ROOM_RE); return m && m[1] === room });
-    if (!hit && process.env.PRINTER_CDP_PORT) continue;
+    if (!hit && cdpLockedPort) {
+      // 锁定模式下没有目标房间标签页时，复用窗口里已有的任意直播间标签页，
+      // run() 挂接后会自动 Page.navigate 到新房间（换房不再要求重新开始抓取）。
+      const anyLive = pages.find(t => ROOM_RE.test(t.url || ''));
+      if (anyLive) hit = anyLive;
+      else continue;
+    }
     if (!hit) {
       console.log('[' + stamp() + '] 在 :' + port + ' 没找到房间标签页，新开一个（不动你已开的页面）…');
       hit = await openTab(port, roomUrl);
@@ -738,11 +748,23 @@ async function run(hub) {
   const room = currentRoom;
   let found = await findTarget(room);
   if (!found) {
-    if (process.env.PRINTER_CDP_PORT) throw new Error('独立直播窗口未就绪，请完成登录后重新开始抓取');
-    await launchStandaloneChrome(room);
-    found = await findTarget(room);
+    if (cdpLockedPort) {
+      // 独立直播窗口进程已退出（端口无响应）→ 解除锁定，回退到默认浏览器来源并自建窗口。
+      let alive = true;
+      try { await listPages(Number(cdpLockedPort)) } catch { alive = false }
+      if (!alive) {
+        console.log('[' + stamp() + '] ⚠️ 独立直播窗口已关闭（:' + cdpLockedPort + ' 无响应），回退到默认浏览器来源并弹出直播间窗口');
+        cdpLockedPort = '';
+      }
+    }
+    if (!cdpLockedPort) {
+      await launchStandaloneChrome(room);
+      found = await findTarget(room);
+    }
   }
-  if (!found) throw new Error('无法获得直播间页面（尝试过 :9110 :9222 :9223）');
+  if (!found) throw new Error(cdpLockedPort
+    ? '独立直播窗口未就绪，请在窗口中完成登录后重新开始抓取'
+    : '无法获得直播间页面（尝试过 :9223 :9110 :9222）');
   const { port, target } = found;
   console.log('[' + stamp() + '] 已挂接浏览器 :%d → %s', port, target.url);
   const { ws, rpc } = await attachCDP(target);
@@ -768,9 +790,16 @@ async function run(hub) {
   await cdpRef.rpc('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }).catch(() => { });
 
   // 断线重连：永久重试但每次都带 catch，绝不让 unhandled rejection 杀掉进程。
+  // 同一错误消息 30 秒内只打印一次，避免长时间未就绪时 3 秒一条刷爆日志。
+  let lastRetryMsg = '', lastRetryAt = 0;
   const reconnect = () => setTimeout(() => {
     run(hub).catch(e => {
-      console.error('[' + stamp() + '] ❌ ' + (e.message || e) + '，3 秒后重试');
+      const msg = e.message || String(e);
+      const now = Date.now();
+      if (msg !== lastRetryMsg || now - lastRetryAt > 30000) {
+        console.error('[' + stamp() + '] ❌ ' + msg + '，3 秒后重试');
+        lastRetryMsg = msg; lastRetryAt = now;
+      }
       reconnect();
     });
   }, 3000);
